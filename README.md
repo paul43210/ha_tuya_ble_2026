@@ -1,5 +1,26 @@
 # Home Assistant support for Tuya BLE devices
 
+## About This Fork
+
+This is a compatibility fork of [PlusPlus-ua/ha_tuya_ble](https://github.com/PlusPlus-ua/ha_tuya_ble) maintained by [@paul43210](https://github.com/paul43210), updated to work with **Home Assistant 2025.x and 2026.x**.
+
+### Compatibility Fixes Applied (April 2026)
+
+The original repository became incompatible with modern Home Assistant versions due to several breaking changes. The following fixes were applied in collaboration with [Claude](https://claude.ai) (Anthropic):
+
+| File | Fix |
+|---|---|
+| `manifest.json` | Changed `pycountry==22.3.5` → `pycountry>=22.3.5` to resolve dependency conflict with HA 2025+ |
+| `const.py` | Replaced `from homeassistant.backports.enum import StrEnum` → `from enum import StrEnum` (module removed in HA 2024.x) |
+| `config_flow.py` | Removed import of `CONF_ACCESS_ID` and other constants from `homeassistant.components.tuya.const` (removed in HA 2024.1); defined locally. Added `TuyaCountry` dataclass and full country list. Added `FlowResult` compatibility shim for HA 2025.1+ |
+| `cloud.py` | Removed import of `CONF_ACCESS_ID` and other constants from `homeassistant.components.tuya.const`; defined locally |
+
+### Use Case
+
+This fork was tested with **MOES CTL20H SmartLock BLE cabinet locks** on a Beelink Mini S13 (Intel N150) running Home Assistant OS 2026.4, with Bluetooth 5.2 providing local BLE control — no hub, no cloud dependency after initial setup.
+
+---
+
 ## Overview
 
 This integration supports Tuya devices connected via BLE.
@@ -8,15 +29,19 @@ _Inspired by code of [@redphx](https://github.com/redphx/poc-tuya-ble-fingerbot)
 
 ## Installation
 
-Place the `custom_components` folder in your configuration directory (or add its contents to an existing `custom_components` folder). Alternatively install via [HACS](https://hacs.xyz/).
+Install via [HACS](https://hacs.xyz/) by adding this repository as a custom integration repository:
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=PlusPlus-ua&repository=ha_tuya_ble&category=integration)
+`https://github.com/paul43210/ha_tuya_ble_2026`
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=paul43210&repository=ha_tuya_ble_2026&category=integration)
 
 ## Usage
 
-After adding to Home Assistant integration should discover all supported Bluetooth devices, or you can add discoverable devices manually.
+After adding to Home Assistant the integration should discover all supported Bluetooth devices, or you can add discoverable devices manually.
 
-The integration works locally, but connection to Tuya BLE device requires device ID and encryption key from Tuya IOT cloud. It could be obtained using the same credentials as in official Tuya integration. To obtain the credentials, please refer to official Tuya integration [documentation](https://www.home-assistant.io/integrations/tuya/)
+The integration works locally over BLE. Initial setup requires a one-time cloud credential fetch from the [Tuya IoT Platform](https://iot.tuya.com) to obtain device IDs and encryption keys. After setup, all communication is local Bluetooth — no internet connection required for day-to-day operation.
+
+To obtain credentials, refer to the official Tuya integration [documentation](https://www.home-assistant.io/integrations/tuya/).
 
 ## Supported devices list
 
@@ -38,6 +63,7 @@ The integration works locally, but connection to Tuya BLE device requires device
 
 * Smart Locks (category_id 'ms')
   + Smart Lock (product_id 'ludzroix', 'isk2p555').
+  + CTL20H SmartLock cabinet/drawer lock (tested April 2026).
 
 * Climate (category_id 'wk')
   + Thermostatic Radiator Valve (product_ids 'drlajpqc', 'nhj2j7su').
@@ -48,11 +74,10 @@ The integration works locally, but connection to Tuya BLE device requires device
 * Irrigation computer (category_id 'ggq')
   + Irrigation computer (product_id '6pahkcau')
 
-## Support project
+## Support the original project
 
-I am working on this integration in Ukraine. Our country was subjected to brutal aggression by Russia. The war still continues. The capital of Ukraine - Kyiv, where I live, and many other cities and villages are constantly under threat of rocket attacks. Our air defense forces are doing wonders, but they also need support. So if you want to help the development of this integration, donate some money and I will spend it to support our air defense.
-<br><br>
+The original integration was written by PlusPlus-ua, who lives and works in Ukraine. If you find this integration useful, please consider supporting the original author:
+
 <p align="center">
   <a href="https://www.buymeacoffee.com/3PaK6lXr4l"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy me an air defense"></a>
 </p>
-
