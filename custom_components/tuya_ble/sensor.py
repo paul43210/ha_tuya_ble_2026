@@ -17,11 +17,17 @@ from homeassistant.const import (
     CONCENTRATION_PARTS_PER_MILLION,
     PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
-    TEMP_CELSIUS,
-    VOLUME_MILLILITERS,
     UnitOfTemperature,
-    UnitOfTime
+    UnitOfTime,
 )
+try:
+    from homeassistant.const import TEMP_CELSIUS
+except ImportError:
+    TEMP_CELSIUS = "°C"
+try:
+    from homeassistant.const import VOLUME_MILLILITERS
+except ImportError:
+    VOLUME_MILLILITERS = "mL"
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback

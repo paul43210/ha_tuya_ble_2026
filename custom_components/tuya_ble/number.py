@@ -15,15 +15,17 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONCENTRATION_PARTS_PER_MILLION,
     PERCENTAGE,
-    VOLUME_MILLILITERS,
     UnitOfTemperature,
 )
 try:
     from homeassistant.const import TIME_MINUTES, TIME_SECONDS
 except ImportError:
-    from homeassistant.components.sensor import SensorDeviceClass
     TIME_MINUTES = "min"
     TIME_SECONDS = "s"
+try:
+    from homeassistant.const import VOLUME_MILLILITERS
+except ImportError:
+    VOLUME_MILLILITERS = "mL"
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
