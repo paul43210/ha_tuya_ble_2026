@@ -142,6 +142,20 @@ class HASSTuyaBLEDeviceManager(AbstaractTuyaBLEDeviceManager):
             data.get(CONF_APP_TYPE, ""),
         )
 
+        _LOGGER.warning(
+            "Login attempt response for %s: success=%s, code=%s, msg=%s",
+            data.get(CONF_USERNAME, "?"),
+            response.get("success"),
+            response.get("code"),
+            response.get("msg"),
+        )
+        _LOGGER.warning(
+            "Login params: endpoint=%s, auth_type=%s, app_type=%s, country=%s",
+            data.get(CONF_ENDPOINT, "?"),
+            data.get(CONF_AUTH_TYPE, "?"),
+            data.get(CONF_APP_TYPE, "?"),
+            data.get(CONF_COUNTRY_CODE, "?"),
+        )
         if self._is_login_success(response):
             _LOGGER.debug("Successful login for %s", data[CONF_USERNAME])
             if add_to_cache:
