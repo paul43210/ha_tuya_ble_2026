@@ -193,6 +193,11 @@ class HASSTuyaBLEDeviceManager(AbstaractTuyaBLEDeviceManager):
                         TUYA_API_FACTORY_INFO_URL % (device.get("id")),
                     )
                     fi_response_result = fi_response.get(TUYA_RESPONSE_RESULT)
+                    _LOGGER.warning(
+                        "Factory info for device %s: %s",
+                        device.get("id"),
+                        fi_response_result,
+                    )
                     if fi_response_result and len(fi_response_result) > 0:
                         factory_info = fi_response_result[0]
                         if factory_info and (TUYA_FACTORY_INFO_MAC in factory_info):
