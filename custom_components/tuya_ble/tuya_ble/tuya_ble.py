@@ -23,7 +23,9 @@ from Crypto.Cipher import AES
 
 from .const import (
     CHARACTERISTIC_NOTIFY,
+    CHARACTERISTIC_NOTIFY_OLD,
     CHARACTERISTIC_WRITE,
+    CHARACTERISTIC_WRITE_OLD,
     GATT_MTU,
     MANUFACTURER_DATA_ID,
     RESPONSE_WAIT_TIMEOUT,
@@ -605,11 +607,24 @@ class TuyaBLEDevice:
                         await self._client.start_notify(
                             CHARACTERISTIC_NOTIFY, self._notification_handler
                         )
-                    except:  # [BLEAK_EXCEPTIONS, BleakNotFoundError]:
-                        self._client = None
-                        _LOGGER.error("%s: starting notifications failed",
-                                      self.address, exc_info=True)
-                        continue
+                        self._char_notify = CHARACTERISTIC_NOTIFY
+                        self._char_write = CHARACTERISTIC_WRITE
+                    except Exception:
+                        try:
+                            await self._client.start_notify(
+                                CHARACTERISTIC_NOTIFY_OLD, self._notification_handler
+                            )
+                            self._char_notify = CHARACTERISTIC_NOTIFY_OLD
+                            self._char_write = CHARACTERISTIC_WRITE_OLD
+                            _LOGGER.warning(
+                                "%s: Using legacy BLE protocol (0xFD50)",
+                                self.address,
+                            )
+                        except:
+                            self._client = None
+                            _LOGGER.error("%s: starting notifications failed",
+                                          self.address, exc_info=True)
+                            continue
                 else:
                     continue
 
@@ -948,7 +963,7 @@ class TuyaBLEDevice:
                 try:
                     # _LOGGER.debug("%s: Sending packet: %s", self.address, packet.hex())
                     await self._client.write_gatt_char(
-                        CHARACTERISTIC_WRITE,
+                        getattr(self, "_char_write", CHARACTERISTIC_WRITE),
                         packet,
                         False,
                     )
