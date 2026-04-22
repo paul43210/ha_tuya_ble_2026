@@ -20,24 +20,26 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowHandler, FlowResult
+from homeassistant.data_entry_flow import FlowHandler
+try:
+    from homeassistant.data_entry_flow import FlowResult
+except ImportError:
+    from typing import Any as FlowResult
 
-from homeassistant.components.tuya.const import (
-    CONF_ACCESS_ID,
-    CONF_ACCESS_SECRET,
-    CONF_APP_TYPE,
-    CONF_AUTH_TYPE,
-    CONF_COUNTRY_CODE,
-    CONF_ENDPOINT,
-    CONF_PASSWORD,
-    CONF_USERNAME,
-    SMARTLIFE_APP,
-    TUYA_COUNTRIES,
-    TUYA_RESPONSE_CODE,
-    TUYA_RESPONSE_MSG,
-    TUYA_RESPONSE_SUCCESS,
-    TUYA_SMART_APP,
-)
+CONF_ACCESS_ID = "access_id"
+CONF_ACCESS_SECRET = "access_secret"
+CONF_APP_TYPE = "tuya_app_type"
+CONF_AUTH_TYPE = "auth_type"
+CONF_COUNTRY_CODE = "country_code"
+CONF_ENDPOINT = "endpoint"
+CONF_PASSWORD = "password"
+CONF_USERNAME = "username"
+SMARTLIFE_APP = "smartlife_app"
+TUYA_SMART_APP = "tuyaSmart"
+TUYA_RESPONSE_CODE = "code"
+TUYA_RESPONSE_MSG = "msg"
+TUYA_RESPONSE_SUCCESS = "success"
+TUYA_COUNTRIES = []
 
 from .tuya_ble import SERVICE_UUID, TuyaBLEDeviceCredentials
 
