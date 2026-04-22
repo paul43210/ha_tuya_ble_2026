@@ -138,7 +138,7 @@ class HASSTuyaBLEDeviceManager(AbstaractTuyaBLEDeviceManager):
             api.connect,
             data.get(CONF_USERNAME, ""),
             data.get(CONF_PASSWORD, ""),
-            data.get(CONF_COUNTRY_CODE, ""),
+            data.get(CONF_COUNTRY_CODE, "").split("-")[0],
             data.get(CONF_APP_TYPE, ""),
         )
 
