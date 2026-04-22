@@ -429,11 +429,18 @@ class TuyaBLEConfigFlow(ConfigFlow, domain=DOMAIN):
         else:
             current_addresses = self._async_current_ids()
             for discovery in async_discovered_service_info(self.hass):
+                is_tuya_uuid = (
+                    discovery.service_data is not None
+                    and SERVICE_UUID in discovery.service_data.keys()
+                )
+                is_tuya_name = (
+                    discovery.name is not None
+                    and discovery.name.startswith("TY")
+                )
                 if (
                     discovery.address in current_addresses
                     or discovery.address in self._discovered_devices
-                    or discovery.service_data is None
-                    or not SERVICE_UUID in discovery.service_data.keys()
+                    or (not is_tuya_uuid and not is_tuya_name)
                 ):
                     continue
                 self._discovered_devices[discovery.address] = discovery
