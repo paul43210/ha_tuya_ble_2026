@@ -187,11 +187,17 @@ devices_database: dict[str, TuyaBLECategoryInfo] = {
                 [
                     "ludzroix",
                     "isk2p555",
-                    "y2yaegze",  # CTL20H SmartLock
                 ],
                     TuyaBLEProductInfo(  # device product_id
                     name="Smart Lock",
                 ),
+            ),
+        },
+    ),
+    "jtmspro": TuyaBLECategoryInfo(
+        products={
+            "y2yaegze": TuyaBLEProductInfo(  # CTL20H SmartLock
+                name="CTL20H SmartLock",
             ),
         },
     ),
