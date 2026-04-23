@@ -108,6 +108,21 @@ mapping: dict[str, TuyaBLECategoryButtonMapping] = {
             ],
         },
     ),
+    "jtmspro": TuyaBLECategoryButtonMapping(
+        products={
+            "y2yaegze":  # CTL20H SmartLock
+            [
+                TuyaBLEButtonMapping(
+                    dp_id=19,  # unlock_ble
+                    dp_type=TuyaBLEDataPointType.DT_RAW,
+                    description=ButtonEntityDescription(
+                        key="ble_unlock_experimental",
+                        icon="mdi:lock-open-variant",
+                    ),
+                ),
+            ],
+        },
+    ),
 }
 
 
@@ -141,13 +156,34 @@ class TuyaBLEButton(TuyaBLEEntity, ButtonEntity):
 
     def press(self) -> None:
         """Press the button."""
-        datapoint = self._device.datapoints.get_or_create(
-            self._mapping.dp_id,
-            TuyaBLEDataPointType.DT_BOOL,
-            False,
-        )
-        if datapoint:
-            self._hass.create_task(datapoint.set_value(not bool(datapoint.value)))
+        dp_type = self._mapping.dp_type or TuyaBLEDataPointType.DT_BOOL
+        if dp_type == TuyaBLEDataPointType.DT_RAW:
+            # RAW buttons (e.g. jtmspro BLE unlock) send a 1-byte command value.
+            # The exact value for unlock_ble on jtmspro is not confirmed — most
+            # Tuya locks accept b"\x01" as the unlock trigger.
+            datapoint = self._device.datapoints.get_or_create(
+                self._mapping.dp_id,
+                TuyaBLEDataPointType.DT_RAW,
+                b"\x01",
+            )
+            if datapoint:
+                _LOGGER.warning(
+                    "EXPERIMENTAL: sending DP %s RAW unlock command (0x01). "
+                    "If lock opens, great; if not, need HCI capture.",
+                    self._mapping.dp_id,
+                )
+                self._hass.create_task(datapoint.set_value(b"\x01"))
+        else:
+            # Original behavior: toggle BOOL for fingerbot-style buttons.
+            datapoint = self._device.datapoints.get_or_create(
+                self._mapping.dp_id,
+                TuyaBLEDataPointType.DT_BOOL,
+                False,
+            )
+            if datapoint:
+                self._hass.create_task(
+                    datapoint.set_value(not bool(datapoint.value))
+                )
 
     @property
     def available(self) -> bool:

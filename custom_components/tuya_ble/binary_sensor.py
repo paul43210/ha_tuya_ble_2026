@@ -67,6 +67,31 @@ mapping: dict[str, TuyaBLECategoryBinarySensorMapping] = {
             ],
         },
     ),
+    "jtmspro": TuyaBLECategoryBinarySensorMapping(
+        products={
+            "y2yaegze": [  # CTL20H SmartLock
+                TuyaBLEBinarySensorMapping(
+                    dp_id=47,  # lock_motor_state
+                    description=BinarySensorEntityDescription(
+                        key="lock_motor_state",
+                        icon="mdi:lock",
+                        # No device_class=LOCK because Tuya jtmspro encoding
+                        # of True/False -> locked/unlocked is not yet verified
+                        # on this specific model. Watch logs when state changes
+                        # to confirm which value means which.
+                    ),
+                ),
+                TuyaBLEBinarySensorMapping(
+                    dp_id=33,  # auto_lock config flag
+                    description=BinarySensorEntityDescription(
+                        key="auto_lock",
+                        icon="mdi:lock-clock",
+                        entity_category=EntityCategory.DIAGNOSTIC,
+                    ),
+                ),
+            ],
+        },
+    ),
 }
 
 

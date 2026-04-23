@@ -235,6 +235,7 @@ class TuyaBLEDevice:
         self._is_bound = False
         self._flags = 0
         self._protocol_version = 2
+        self._outbound_dp_seq = 0  # V4 outgoing DP sequence counter
 
         self._device_version: str = ""
         self._protocol_version_str: str = ""
@@ -1458,9 +1459,46 @@ class TuyaBLEDevice:
 
         await self._send_packet(TuyaBLECode.FUN_SENDER_DPS, data)
 
+    async def _send_datapoints_v4(self, datapoint_ids: list[int]) -> None:
+        """Send new values of datapoints to a V4 protocol device.
+
+        EXPERIMENTAL. Format is reverse-engineered from V4 receive traces.
+        Not yet validated against a known-good HCI capture of the Smart
+        Life app performing the same operation.
+
+        Format:
+          opcode:  FUN_SENDER_DPS_V4 (0x0027)
+          payload: [dp_seq:4 BE][records...]
+          record:  [id:1][type:1][reserved:1][len:1][val:len]
+        """
+        self._outbound_dp_seq = (self._outbound_dp_seq + 1) & 0xFFFFFFFF
+        data = bytearray(pack(">I", self._outbound_dp_seq))
+
+        for dp_id in datapoint_ids:
+            dp = self._datapoints[dp_id]
+            value = dp._get_value()
+            _LOGGER.warning(
+                "%s: [EXPERIMENTAL V4 SEND] dp_id=%s type=%s value=%s bytes=%s",
+                self.address,
+                dp.id,
+                dp.type.name,
+                dp.value,
+                value.hex(),
+            )
+            data += pack(">BBBB", dp.id, int(dp.type.value), 0, len(value))
+            data += value
+
+        await self._send_packet(TuyaBLECode.FUN_SENDER_DPS_V4, data)
+
     async def _send_datapoints(self, datapoint_ids: list[int]) -> None:
         """Send new values of datapoints to the device."""
         if self._protocol_version == 3:
             await self._send_datapoints_v3(datapoint_ids)
+        elif self._protocol_version == 4:
+            await self._send_datapoints_v4(datapoint_ids)
         else:
+            _LOGGER.error(
+                "%s: no send implementation for protocol version %s",
+                self.address, self._protocol_version,
+            )
             raise TuyaBLEDeviceError(0)
