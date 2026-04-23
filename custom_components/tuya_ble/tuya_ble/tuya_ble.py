@@ -1129,16 +1129,17 @@ class TuyaBLEDevice:
             dp_type = TuyaBLEDataPointType(_type)
             raw_value = data[pos + 4:next_pos]
 
-            # Special case: session-summary wrapper carries battery % in its
-            # 8-byte val. Observed wrapper dp_id varies (seen 9 and 13) so
-            # we match on the nested-DP signature instead: val starts with
-            # 02 00 04 00, ends with 2f, total 8 bytes. Extract battery
-            # from bytes 4-7 BE and emit as DP 8. Then skip the outer
-            # wrapper so it doesn't register as its own phantom entity.
+            # Special case: session-summary wrapper carries battery % as a
+            # nested V3-format DP: [id=02][type=00 RAW][len=04][val=4 BE bytes]
+            # plus trailing byte 2f (lock_motor_state reference). Total 8 bytes.
+            # The value (battery %) is at bytes 3-6 of the val, NOT 4-7 — the
+            # 3-byte nested header is [02 00 04], then the 4-byte int, then 2f.
+            # Observed wrapper dp_id varies (seen 9 and 13) so we signature-
+            # match on the header bytes 0-2 plus trailing 2f instead.
             if (data_len == 8
-                    and raw_value[:4] == b"\x02\x00\x04\x00"
+                    and raw_value[:3] == b"\x02\x00\x04"
                     and raw_value[-1:] == b"\x2f"):
-                battery_percent = int.from_bytes(raw_value[4:8], "big")
+                battery_percent = int.from_bytes(raw_value[3:7], "big")
                 _LOGGER.info(
                     "%s: battery wrapper (dp=%d) -> DP 8 battery = %d%%",
                     self.address, dp_id, battery_percent,
