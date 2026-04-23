@@ -271,13 +271,18 @@ class TuyaBLEDevice:
             self._decode_advertisement_data()
             
     def _build_pairing_request(self) -> bytes:
+        # Match Smart Life app wire format for Tuya BLE proto v4: 46-byte
+        # payload = uuid(16) + local_key(6) + device_id(16) + zero_pad(6) +
+        # member_index(2, big-endian, 0x0001 = master user).
         result = bytearray()
 
         result += self._device_info.uuid.encode()
         result += self._local_key
         result += self._device_info.device_id.encode()
+        # Pad zeros up to 44, then append 0x0001 member index -> 46 bytes total.
         for _ in range(44 - len(result)):
             result += b"\x00"
+        result += b"\x00\x01"
 
         return result
 
@@ -637,7 +642,7 @@ class TuyaBLEDevice:
                     try:
                         if not await self._send_packet_while_connected(
                             TuyaBLECode.FUN_SENDER_DEVICE_INFO,
-                            bytes(0),
+                            bytes.fromhex("00f3"),
                             0,
                             True,
                         ):
