@@ -1088,6 +1088,94 @@ class TuyaBLEDevice:
 
         self._fire_callbacks(datapoints)
 
+    def _parse_datapoints_v4(
+        self, timestamp: float, flags: int, data: bytes, start_pos: int
+    ) -> None:
+        """Parse V4 DP records: [id:1][type:1][reserved:1][len:1][val:len].
+
+        V4 packets start with a 4-byte dp_seq prefix; call this with
+        start_pos=4 to skip it.
+
+        DP 9 is a session-summary wrapper. Its 8-byte val carries a
+        nested V3-format DP (id=2 raw, 4-byte BE int) that holds the
+        battery percentage. We extract that and synthesize a DP 8
+        VALUE update so the existing sensor.py battery mapping fires.
+        """
+        datapoints: list[TuyaBLEDataPoint] = []
+        pos = start_pos
+
+        while len(data) - pos >= 4:
+            dp_id: int = data[pos]
+            _type: int = data[pos + 1]
+            reserved: int = data[pos + 2]
+            data_len: int = data[pos + 3]
+
+            if _type > TuyaBLEDataPointType.DT_BITMAP.value:
+                _LOGGER.warning(
+                    "%s: V4 DP parse: invalid type %s at pos %s, "
+                    "remaining=%s",
+                    self.address, _type, pos + 1, data[pos:].hex(),
+                )
+                break
+
+            next_pos = pos + 4 + data_len
+            if next_pos > len(data):
+                _LOGGER.warning(
+                    "%s: V4 DP parse: len %s overflows buffer at pos %s",
+                    self.address, data_len, pos,
+                )
+                break
+
+            dp_type = TuyaBLEDataPointType(_type)
+            raw_value = data[pos + 4:next_pos]
+
+            # Special case: DP 9 session-summary wrapper carries battery %
+            # as a nested V3 DP (id=2 raw, 4-byte BE int). Emit as DP 8.
+            if (dp_id == 9 and data_len == 8
+                    and raw_value[:4] == b"\x02\x00\x04\x00"):
+                battery_percent = int.from_bytes(raw_value[4:8], "big")
+                _LOGGER.info(
+                    "%s: DP 9 wrapper -> emitting DP 8 battery = %d%%",
+                    self.address, battery_percent,
+                )
+                self._datapoints._update_from_device(
+                    8, timestamp, flags,
+                    TuyaBLEDataPointType.DT_VALUE,
+                    battery_percent,
+                )
+                datapoints.append(self._datapoints[8])
+
+            # Decode outer DP value per type
+            if dp_type in (TuyaBLEDataPointType.DT_RAW,
+                           TuyaBLEDataPointType.DT_BITMAP):
+                value = raw_value
+            elif dp_type == TuyaBLEDataPointType.DT_BOOL:
+                value = int.from_bytes(raw_value, "big") != 0
+            elif dp_type in (TuyaBLEDataPointType.DT_VALUE,
+                             TuyaBLEDataPointType.DT_ENUM):
+                value = int.from_bytes(raw_value, "big", signed=True) \
+                    if data_len > 0 else 0
+            elif dp_type == TuyaBLEDataPointType.DT_STRING:
+                try:
+                    value = raw_value.decode()
+                except UnicodeDecodeError:
+                    value = raw_value.hex()
+            else:
+                value = raw_value
+
+            _LOGGER.debug(
+                "%s: V4 DP id=%s type=%s reserved=%s len=%s value=%s",
+                self.address, dp_id, dp_type.name, reserved, data_len, value,
+            )
+
+            self._datapoints._update_from_device(
+                dp_id, timestamp, flags, dp_type, value,
+            )
+            datapoints.append(self._datapoints[dp_id])
+            pos = next_pos
+
+        self._fire_callbacks(datapoints)
+
     def _handle_command_or_response(
         self, seq_num: int, response_to: int, code: TuyaBLECode, data: bytes
     ) -> None:
@@ -1129,31 +1217,24 @@ class TuyaBLEDevice:
                 result = data[0]
 
             case TuyaBLECode.FUN_RECEIVE_DP_V4:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "%s: FUN_RECEIVE_DP_V4 payload (%d bytes): %s",
                     self.address, len(data), data.hex(),
                 )
-                # V4 DP packets appear to carry a 4-byte prefix (likely a
-                # DP sequence number) followed by per-DP records. The exact
-                # per-DP encoding still needs confirmation from a capture
-                # where DP values are known; for now try the V3 parser on
-                # the payload after the prefix and tolerate failures.
+                # Skip 4-byte dp_seq prefix, parse V4 records.
                 if len(data) >= 4:
-                    self._parse_datapoints_v3(time.time(), 0, data, 4)
-                # Ack with same shape as FUN_RECEIVE_DP ack (empty payload).
+                    self._parse_datapoints_v4(time.time(), 0, data, 4)
                 asyncio.create_task(
                     self._send_response(code, bytes(0), seq_num))
 
             case TuyaBLECode.FUN_RECEIVE_TIME_DP_V4:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "%s: FUN_RECEIVE_TIME_DP_V4 payload (%d bytes): %s",
                     self.address, len(data), data.hex(),
                 )
-                # Structure presumed: [dp_seq:4][timestamp_block][dps...].
-                # Parse timestamp starting at offset 4 and DPs after it.
                 try:
                     timestamp, pos = self._parse_timestamp(data, 4)
-                    self._parse_datapoints_v3(timestamp, 0, data, pos)
+                    self._parse_datapoints_v4(timestamp, 0, data, pos)
                 except Exception as exc:
                     _LOGGER.warning(
                         "%s: FUN_RECEIVE_TIME_DP_V4 parse failed: %s",
