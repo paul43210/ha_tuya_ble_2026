@@ -663,25 +663,32 @@ class TuyaBLEDevice:
                     continue
 
                 if self._client and self._client.is_connected:
-                    _LOGGER.debug("%s: Sending pairing request", self.address)
-                    try:
-                        if not await self._send_packet_while_connected(
-                            TuyaBLECode.FUN_SENDER_PAIR,
-                            self._build_pairing_request(),
-                            0,
-                            True,
-                        ):
+                    # For legacy FD50 devices that are already cloud-paired,
+                    # skip PAIR and go straight to status request
+                    _is_legacy = getattr(self, "_char_notify", None) == CHARACTERISTIC_NOTIFY_OLD
+                    if not _is_legacy:
+                        _LOGGER.debug("%s: Sending pairing request", self.address)
+                        try:
+                            if not await self._send_packet_while_connected(
+                                TuyaBLECode.FUN_SENDER_PAIR,
+                                self._build_pairing_request(),
+                                0,
+                                True,
+                            ):
+                                self._client = None
+                                _LOGGER.error(
+                                    "%s: Sending pairing request failed",
+                                    self.address,
+                                )
+                                continue
+                        except:  # [BLEAK_EXCEPTIONS, BleakNotFoundError]:
                             self._client = None
-                            _LOGGER.error(
-                                "%s: Sending pairing request failed",
-                                self.address,
-                            )
+                            _LOGGER.error("%s: Sending pairing request failed",
+                                          self.address, exc_info=True)
                             continue
-                    except:  # [BLEAK_EXCEPTIONS, BleakNotFoundError]:
-                        self._client = None
-                        _LOGGER.error("%s: Sending pairing request failed",
-                                      self.address, exc_info=True)
-                        continue
+                    else:
+                        _LOGGER.warning("%s: Legacy device — skipping PAIR, requesting status directly", self.address)
+                        self._is_paired = True
                 else:
                     continue
 
