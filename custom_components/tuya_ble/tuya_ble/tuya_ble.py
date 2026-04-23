@@ -1129,14 +1129,19 @@ class TuyaBLEDevice:
             dp_type = TuyaBLEDataPointType(_type)
             raw_value = data[pos + 4:next_pos]
 
-            # Special case: DP 9 session-summary wrapper carries battery %
-            # as a nested V3 DP (id=2 raw, 4-byte BE int). Emit as DP 8.
-            if (dp_id == 9 and data_len == 8
-                    and raw_value[:4] == b"\x02\x00\x04\x00"):
+            # Special case: session-summary wrapper carries battery % in its
+            # 8-byte val. Observed wrapper dp_id varies (seen 9 and 13) so
+            # we match on the nested-DP signature instead: val starts with
+            # 02 00 04 00, ends with 2f, total 8 bytes. Extract battery
+            # from bytes 4-7 BE and emit as DP 8. Then skip the outer
+            # wrapper so it doesn't register as its own phantom entity.
+            if (data_len == 8
+                    and raw_value[:4] == b"\x02\x00\x04\x00"
+                    and raw_value[-1:] == b"\x2f"):
                 battery_percent = int.from_bytes(raw_value[4:8], "big")
                 _LOGGER.info(
-                    "%s: DP 9 wrapper -> emitting DP 8 battery = %d%%",
-                    self.address, battery_percent,
+                    "%s: battery wrapper (dp=%d) -> DP 8 battery = %d%%",
+                    self.address, dp_id, battery_percent,
                 )
                 self._datapoints._update_from_device(
                     8, timestamp, flags,
@@ -1144,6 +1149,8 @@ class TuyaBLEDevice:
                     battery_percent,
                 )
                 datapoints.append(self._datapoints[8])
+                pos = next_pos
+                continue
 
             # Decode outer DP value per type
             if dp_type in (TuyaBLEDataPointType.DT_RAW,
