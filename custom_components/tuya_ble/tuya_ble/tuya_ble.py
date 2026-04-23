@@ -631,12 +631,15 @@ class TuyaBLEDevice:
                 if self._client and self._client.is_connected:
                     _LOGGER.debug(
                         "%s: Sending device info request", self.address)
+                    # For legacy FD50 protocol devices, skip waiting for
+                    # DEVICE_INFO response — they do not implement it.
+                    _is_legacy = getattr(self, "_char_notify", None) == CHARACTERISTIC_NOTIFY_OLD
                     try:
                         if not await self._send_packet_while_connected(
                             TuyaBLECode.FUN_SENDER_DEVICE_INFO,
                             bytes(0),
                             0,
-                            True,
+                            not _is_legacy,  # don't wait for response on legacy
                         ):
                             self._client = None
                             _LOGGER.error(
