@@ -1045,14 +1045,24 @@ class TuyaBLEDevice:
             pos += 1
             _type: int = data[pos]
             if _type > TuyaBLEDataPointType.DT_BITMAP.value:
-                raise TuyaBLEDataFormatError()
+                _LOGGER.warning(
+                    "%s: DP parse: invalid type %s at pos %s, "
+                    "remaining=%s. Stopping parse but keeping connection.",
+                    self.address, _type, pos - 1, data[pos-1:].hex(),
+                )
+                break
             type: TuyaBLEDataPointType = TuyaBLEDataPointType(_type)
             pos += 1
             data_len: int = data[pos]
             pos += 1
             next_pos = pos + data_len
             if next_pos > len(data):
-                raise TuyaBLEDataLengthError()
+                _LOGGER.warning(
+                    "%s: DP parse: length %s exceeds buffer at pos %s. "
+                    "Stopping parse.",
+                    self.address, data_len, pos - 1,
+                )
+                break
             raw_value = data[pos:next_pos]
             match type:
                 case (TuyaBLEDataPointType.DT_RAW | TuyaBLEDataPointType.DT_BITMAP):
@@ -1117,6 +1127,40 @@ class TuyaBLEDevice:
                 if len(data) != 1:
                     raise TuyaBLEDataLengthError()
                 result = data[0]
+
+            case TuyaBLECode.FUN_RECEIVE_DP_V4:
+                _LOGGER.warning(
+                    "%s: FUN_RECEIVE_DP_V4 payload (%d bytes): %s",
+                    self.address, len(data), data.hex(),
+                )
+                # V4 DP packets appear to carry a 4-byte prefix (likely a
+                # DP sequence number) followed by per-DP records. The exact
+                # per-DP encoding still needs confirmation from a capture
+                # where DP values are known; for now try the V3 parser on
+                # the payload after the prefix and tolerate failures.
+                if len(data) >= 4:
+                    self._parse_datapoints_v3(time.time(), 0, data, 4)
+                # Ack with same shape as FUN_RECEIVE_DP ack (empty payload).
+                asyncio.create_task(
+                    self._send_response(code, bytes(0), seq_num))
+
+            case TuyaBLECode.FUN_RECEIVE_TIME_DP_V4:
+                _LOGGER.warning(
+                    "%s: FUN_RECEIVE_TIME_DP_V4 payload (%d bytes): %s",
+                    self.address, len(data), data.hex(),
+                )
+                # Structure presumed: [dp_seq:4][timestamp_block][dps...].
+                # Parse timestamp starting at offset 4 and DPs after it.
+                try:
+                    timestamp, pos = self._parse_timestamp(data, 4)
+                    self._parse_datapoints_v3(timestamp, 0, data, pos)
+                except Exception as exc:
+                    _LOGGER.warning(
+                        "%s: FUN_RECEIVE_TIME_DP_V4 parse failed: %s",
+                        self.address, exc,
+                    )
+                asyncio.create_task(
+                    self._send_response(code, bytes(0), seq_num))
 
             case TuyaBLECode.FUN_RECEIVE_TIME1_REQ:
                 if len(data) != 0:
