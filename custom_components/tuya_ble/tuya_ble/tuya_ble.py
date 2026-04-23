@@ -534,7 +534,10 @@ class TuyaBLEDevice:
             self._expected_disconnect = True
             self._client = None
             if client and client.is_connected:
-                await client.stop_notify(CHARACTERISTIC_NOTIFY)
+                try:
+                    await client.stop_notify(getattr(self, "_char_notify", CHARACTERISTIC_NOTIFY))
+                except Exception:
+                    pass
                 await client.disconnect()
         async with self._seq_num_lock:
             self._current_seq_num = 1
@@ -634,6 +637,10 @@ class TuyaBLEDevice:
                     # For legacy FD50 protocol devices, skip waiting for
                     # DEVICE_INFO response — they do not implement it.
                     _is_legacy = getattr(self, "_char_notify", None) == CHARACTERISTIC_NOTIFY_OLD
+                    if _is_legacy and self._session_key is None:
+                        # Legacy devices don't respond to DEVICE_INFO;
+                        # seed session_key with login_key so PAIR can proceed
+                        self._session_key = self._login_key
                     try:
                         if not await self._send_packet_while_connected(
                             TuyaBLECode.FUN_SENDER_DEVICE_INFO,
