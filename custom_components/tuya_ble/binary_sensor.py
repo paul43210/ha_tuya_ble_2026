@@ -81,14 +81,6 @@ mapping: dict[str, TuyaBLECategoryBinarySensorMapping] = {
                         # to confirm which value means which.
                     ),
                 ),
-                TuyaBLEBinarySensorMapping(
-                    dp_id=33,  # auto_lock config flag
-                    description=BinarySensorEntityDescription(
-                        key="auto_lock",
-                        icon="mdi:lock-clock",
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                    ),
-                ),
             ],
         },
     ),

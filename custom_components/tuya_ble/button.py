@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import logging
+import time
 from typing import Callable
 
 from homeassistant.components.button import (
@@ -32,6 +33,11 @@ class TuyaBLEButtonMapping:
     force_add: bool = True
     dp_type: TuyaBLEDataPointType | None = None
     is_available: TuyaBLEButtonIsAvailable = None
+    # If raw_subcmd is set, pressing the button sends a raw V4 subcommand
+    # instead of writing a DP. raw_payload_builder returns the payload bytes
+    # at press time (so timestamps can be current).
+    raw_subcmd: int | None = None
+    raw_payload_builder: Callable[[TuyaBLEDevice], bytes] | None = None
 
 
 def is_fingerbot_in_push_mode(self: TuyaBLEButton, product: TuyaBLEProductInfo) -> bool:
@@ -57,6 +63,36 @@ class TuyaBLEFingerbotModeMapping(TuyaBLEButtonMapping):
 class TuyaBLECategoryButtonMapping:
     products: dict[str, list[TuyaBLEButtonMapping]] | None = None
     mapping: list[TuyaBLEButtonMapping] | None = None
+
+
+# jtmspro BLE user_id captured from Paul's Smart Life pairing session.
+# Smart Life generated this 8-digit ASCII number when it first registered
+# with the lock via subcmd 0x45. The lock persists the list of authorized
+# user_ids across reconnects; reusing this value lets us issue unlock
+# commands (subcmd 0x47) without going through the registration flow.
+# If the lock is factory reset, this ID becomes invalid and needs to be
+# re-registered from a fresh pairing capture.
+JTMSPRO_BLE_USER_ID = b"84042128"
+
+
+def _build_jtmspro_unlock_payload(device: TuyaBLEDevice) -> bytes:
+    """Build the 19-byte subcmd 0x47 unlock payload.
+
+    Format (verified against HCI capture of Smart Life unlock):
+      ff ff 00 02             4-byte constant prefix
+      [user_id_ascii:8]       registered BLE user identifier
+      01                      unlock type flag
+      [timestamp:4 BE]        current Unix timestamp
+      00 01                   trailer ("01" seems to indicate "act on it")
+    """
+    import struct
+    ts = int(time.time())
+    payload = bytearray(b"\xff\xff\x00\x02")
+    payload += JTMSPRO_BLE_USER_ID  # 8 bytes
+    payload += b"\x01"               # unlock type flag
+    payload += struct.pack(">I", ts)
+    payload += b"\x00\x01"           # trailer
+    return bytes(payload)
 
 
 mapping: dict[str, TuyaBLECategoryButtonMapping] = {
@@ -113,12 +149,16 @@ mapping: dict[str, TuyaBLECategoryButtonMapping] = {
             "y2yaegze":  # CTL20H SmartLock
             [
                 TuyaBLEButtonMapping(
-                    dp_id=19,  # unlock_ble
-                    dp_type=TuyaBLEDataPointType.DT_RAW,
+                    # dp_id 0 is a sentinel — we ignore DP for raw subcmd buttons.
+                    # force_add=True (default) ensures the entity registers
+                    # even though there's no DP record to match.
+                    dp_id=0,
                     description=ButtonEntityDescription(
-                        key="ble_unlock_experimental",
+                        key="ble_unlock",
                         icon="mdi:lock-open-variant",
                     ),
+                    raw_subcmd=0x47,
+                    raw_payload_builder=_build_jtmspro_unlock_payload,
                 ),
             ],
         },
@@ -156,34 +196,32 @@ class TuyaBLEButton(TuyaBLEEntity, ButtonEntity):
 
     def press(self) -> None:
         """Press the button."""
-        dp_type = self._mapping.dp_type or TuyaBLEDataPointType.DT_BOOL
-        if dp_type == TuyaBLEDataPointType.DT_RAW:
-            # RAW buttons (e.g. jtmspro BLE unlock) send a 1-byte command value.
-            # The exact value for unlock_ble on jtmspro is not confirmed — most
-            # Tuya locks accept b"\x01" as the unlock trigger.
-            datapoint = self._device.datapoints.get_or_create(
-                self._mapping.dp_id,
-                TuyaBLEDataPointType.DT_RAW,
-                b"\x01",
+        # Path 1: raw V4 subcommand (e.g. jtmspro unlock)
+        if self._mapping.raw_subcmd is not None:
+            payload = b""
+            if self._mapping.raw_payload_builder is not None:
+                payload = self._mapping.raw_payload_builder(self._device)
+            _LOGGER.info(
+                "Sending raw V4 subcommand %#x with %d-byte payload",
+                self._mapping.raw_subcmd, len(payload),
             )
-            if datapoint:
-                _LOGGER.warning(
-                    "EXPERIMENTAL: sending DP %s RAW unlock command (0x01). "
-                    "If lock opens, great; if not, need HCI capture.",
-                    self._mapping.dp_id,
+            self._hass.create_task(
+                self._device.send_raw_command_v4(
+                    self._mapping.raw_subcmd, payload
                 )
-                self._hass.create_task(datapoint.set_value(b"\x01"))
-        else:
-            # Original behavior: toggle BOOL for fingerbot-style buttons.
-            datapoint = self._device.datapoints.get_or_create(
-                self._mapping.dp_id,
-                TuyaBLEDataPointType.DT_BOOL,
-                False,
             )
-            if datapoint:
-                self._hass.create_task(
-                    datapoint.set_value(not bool(datapoint.value))
-                )
+            return
+
+        # Path 2: DP toggle (fingerbot-style)
+        datapoint = self._device.datapoints.get_or_create(
+            self._mapping.dp_id,
+            TuyaBLEDataPointType.DT_BOOL,
+            False,
+        )
+        if datapoint:
+            self._hass.create_task(
+                datapoint.set_value(not bool(datapoint.value))
+            )
 
     @property
     def available(self) -> bool:

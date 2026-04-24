@@ -235,7 +235,7 @@ class TuyaBLEDevice:
         self._is_bound = False
         self._flags = 0
         self._protocol_version = 2
-        self._outbound_dp_seq = 0  # V4 outgoing DP sequence counter
+        self._outbound_idx = 0  # V4 outgoing command counter (shared across DP writes and subcommands)
 
         self._device_version: str = ""
         self._protocol_version_str: str = ""
@@ -547,6 +547,7 @@ class TuyaBLEDevice:
                 await client.disconnect()
         async with self._seq_num_lock:
             self._current_seq_num = 1
+        self._outbound_idx = 0
 
     async def _ensure_connected(self) -> None:
         """Ensure connection to device is established."""
@@ -703,6 +704,7 @@ class TuyaBLEDevice:
         _LOGGER.debug("%s: Reconnect, ensuring connection", self.address)
         async with self._seq_num_lock:
             self._current_seq_num = 1
+        self._outbound_idx = 0
         try:
             if self._expected_disconnect:
                 return
@@ -1462,24 +1464,28 @@ class TuyaBLEDevice:
     async def _send_datapoints_v4(self, datapoint_ids: list[int]) -> None:
         """Send new values of datapoints to a V4 protocol device.
 
-        EXPERIMENTAL. Format is reverse-engineered from V4 receive traces.
-        Not yet validated against a known-good HCI capture of the Smart
-        Life app performing the same operation.
-
-        Format:
+        Format verified against HCI decryption of Smart Life writing
+        DP 33 (auto_lock) to a CTL20H lock:
           opcode:  FUN_SENDER_DPS_V4 (0x0027)
-          payload: [dp_seq:4 BE][records...]
+          payload: [dp_seq:4 BE = 0][idx:1][records...]
           record:  [id:1][type:1][reserved:1][len:1][val:len]
+
+        dp_seq is always 0. The `idx` byte is a session-wide command
+        counter that increments with each outbound command (DP writes
+        AND subcommand packets share the same counter). Starts at 1
+        on reconnect.
         """
-        self._outbound_dp_seq = (self._outbound_dp_seq + 1) & 0xFFFFFFFF
-        data = bytearray(pack(">I", self._outbound_dp_seq))
+        self._outbound_idx = (self._outbound_idx + 1) & 0xFF
+        data = bytearray(b"\x00\x00\x00\x00")
+        data += pack(">B", self._outbound_idx)
 
         for dp_id in datapoint_ids:
             dp = self._datapoints[dp_id]
             value = dp._get_value()
-            _LOGGER.warning(
-                "%s: [EXPERIMENTAL V4 SEND] dp_id=%s type=%s value=%s bytes=%s",
+            _LOGGER.debug(
+                "%s: V4 DP SEND idx=%d dp_id=%s type=%s value=%s bytes=%s",
                 self.address,
+                self._outbound_idx,
                 dp.id,
                 dp.type.name,
                 dp.value,
@@ -1488,6 +1494,28 @@ class TuyaBLEDevice:
             data += pack(">BBBB", dp.id, int(dp.type.value), 0, len(value))
             data += value
 
+        await self._send_packet(TuyaBLECode.FUN_SENDER_DPS_V4, data)
+
+    async def send_raw_command_v4(
+        self, subcmd: int, payload: bytes
+    ) -> None:
+        """Send a raw V4 subcommand packet (for jtmspro lock unlock etc).
+
+        Format derived from HCI capture of Smart Life unlock:
+          opcode:  FUN_SENDER_DPS_V4 (0x0027)
+          payload: [dp_seq:4 BE = 0][idx:1][subcmd:1][reserved:2 = 0][length:1][payload]
+
+        The idx shares the same session counter as DP writes.
+        """
+        self._outbound_idx = (self._outbound_idx + 1) & 0xFF
+        data = bytearray(b"\x00\x00\x00\x00")
+        data += pack(">B", self._outbound_idx)
+        data += pack(">BBBB", subcmd, 0, 0, len(payload))
+        data += payload
+        _LOGGER.warning(
+            "%s: V4 SUBCMD SEND idx=%d subcmd=%#x payload=%s",
+            self.address, self._outbound_idx, subcmd, payload.hex(),
+        )
         await self._send_packet(TuyaBLECode.FUN_SENDER_DPS_V4, data)
 
     async def _send_datapoints(self, datapoint_ids: list[int]) -> None:
