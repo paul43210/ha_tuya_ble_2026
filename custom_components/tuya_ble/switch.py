@@ -331,12 +331,19 @@ mapping: dict[str, TuyaBLECategorySwitchMapping] = {
     "jtmspro": TuyaBLECategorySwitchMapping(
         products={
             "y2yaegze": [  # CTL20H SmartLock
+                # DP 33 is labeled "auto_lock" in the Tuya schema but on this
+                # firmware it behaves as a persistent lock-state toggle:
+                #   ON  (True)  -> lock engaged (DP 47 -> False, latch extended)
+                #   OFF (False) -> lock disengaged (DP 47 -> True, latch retracted)
+                # Stays in the chosen state indefinitely; distinct from the
+                # momentary unlock button which auto-relocks after ~5 s.
+                # No EntityCategory.CONFIG — this is the primary lock control,
+                # not a configuration setting.
                 TuyaBLESwitchMapping(
-                    dp_id=33,  # auto_lock — verified writable via HCI capture
+                    dp_id=33,
                     description=SwitchEntityDescription(
                         key="auto_lock",
-                        icon="mdi:lock-clock",
-                        entity_category=EntityCategory.CONFIG,
+                        icon="mdi:lock",
                     ),
                 ),
             ],

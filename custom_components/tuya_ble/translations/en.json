@@ -32,11 +32,17 @@
         "binary_sensor": {
             "low_battery": {
                 "name": "Battery"
+            },
+            "lock_motor_state": {
+                "name": "State"
             }
         },
         "button": {
             "push": {
                 "name": "Push"
+            },
+            "ble_unlock": {
+                "name": "Unlock"
             }
         },
         "number": {
@@ -206,6 +212,9 @@
             },
             "window_check": {
                 "name": "Window Check"
+            },
+            "auto_lock": {
+                "name": "Lock"
             }
         },
         "text": {
