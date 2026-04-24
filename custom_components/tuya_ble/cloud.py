@@ -47,6 +47,7 @@ from .const import (
     CONF_PRODUCT_ID,
     CONF_DEVICE_NAME,
     CONF_PRODUCT_NAME,
+    CONF_BLE_USER_ID,
     DOMAIN,
     TUYA_API_DEVICES_URL,
     TUYA_API_FACTORY_INFO_URL,
@@ -54,6 +55,44 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _parse_jtmspro_ble_user_id(status: list | None) -> str | None:
+    """Extract 8-byte ASCII user_id from a jtmspro device's ble_unlock_check DP.
+
+    ble_unlock_check is a base64 status field the lock populates after each BLE
+    unlock. It embeds the user_id of the most recent unlocker. Wire format:
+      [0:2]    index (incremented per unlock)
+      [2:4]    separator (0xffff)
+      [4:12]   user_id (8 ASCII digits)
+      [12:13]  type flag
+      [13:17]  unix timestamp (BE)
+      [17:]    trailer
+
+    Returns None if status is missing/empty (lock never unlocked via Smart Life
+    since pairing), malformed, or doesn't match the expected format.
+    """
+    import base64 as _b64
+    if not status:
+        return None
+    for item in status:
+        if not isinstance(item, dict) or item.get("code") != "ble_unlock_check":
+            continue
+        value = item.get("value")
+        if not value:
+            return None
+        try:
+            raw = _b64.b64decode(value)
+        except Exception:
+            return None
+        if len(raw) < 12 or raw[2:4] != b"\xff\xff":
+            return None
+        user_id = raw[4:12]
+        if not user_id.isdigit():
+            return None
+        return user_id.decode("ascii")
+    return None
+
 
 
 @dataclass
@@ -205,6 +244,28 @@ class HASSTuyaBLEDeviceManager(AbstaractTuyaBLEDeviceManager):
                                 factory_info[TUYA_FACTORY_INFO_MAC][i : i + 2]
                                 for i in range(0, 12, 2)
                             ).upper()
+                            # jtmspro (BLE smart lock): extract BLE user_id from
+                            # cloud status (ble_unlock_check). Survives factory
+                            # reset after one re-pair + one Smart Life unlock.
+                            ble_user_id = None
+                            if device.get("category") == "jtmspro":
+                                ble_user_id = _parse_jtmspro_ble_user_id(
+                                    device.get("status")
+                                )
+                                if ble_user_id:
+                                    _LOGGER.debug(
+                                        "jtmspro %s: extracted BLE user_id %s",
+                                        device.get("id"),
+                                        ble_user_id,
+                                    )
+                                else:
+                                    _LOGGER.warning(
+                                        "jtmspro %s: no BLE user_id in cloud "
+                                        "status; will fall back to hardcoded "
+                                        "default. Unlock via Smart Life once "
+                                        "to populate ble_unlock_check.",
+                                        device.get("id"),
+                                    )
                             item.credentials[mac] = {
                                 CONF_ADDRESS: mac,
                                 CONF_UUID: device.get("uuid"),
@@ -215,6 +276,7 @@ class HASSTuyaBLEDeviceManager(AbstaractTuyaBLEDeviceManager):
                                 CONF_DEVICE_NAME: device.get("name"),
                                 CONF_PRODUCT_MODEL: device.get("model"),
                                 CONF_PRODUCT_NAME: device.get("product_name"),
+                                CONF_BLE_USER_ID: ble_user_id,
                             }
 
     async def build_cache(self) -> None:
@@ -294,6 +356,7 @@ class HASSTuyaBLEDeviceManager(AbstaractTuyaBLEDeviceManager):
                 credentials.get(CONF_DEVICE_NAME, ""),
                 credentials.get(CONF_PRODUCT_MODEL, ""),
                 credentials.get(CONF_PRODUCT_NAME, ""),
+                credentials.get(CONF_BLE_USER_ID),
             )
             _LOGGER.debug("Retrieved: %s", result)
             if save_data:

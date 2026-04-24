@@ -65,14 +65,11 @@ class TuyaBLECategoryButtonMapping:
     mapping: list[TuyaBLEButtonMapping] | None = None
 
 
-# jtmspro BLE user_id captured from Paul's Smart Life pairing session.
-# Smart Life generated this 8-digit ASCII number when it first registered
-# with the lock via subcmd 0x45. The lock persists the list of authorized
-# user_ids across reconnects; reusing this value lets us issue unlock
-# commands (subcmd 0x47) without going through the registration flow.
-# If the lock is factory reset, this ID becomes invalid and needs to be
-# re-registered from a fresh pairing capture.
-JTMSPRO_BLE_USER_ID = b"84042128"
+# jtmspro fallback BLE user_id — captured from Paul's original Smart Life
+# pairing session. The unlock payload uses cloud-derived user_id (from the
+# ble_unlock_check DP) by preference; this constant is only used if the
+# cloud value is unavailable. Kept in sync with tuya_ble.py fallback.
+JTMSPRO_BLE_USER_ID_FALLBACK = b"84042128"
 
 
 def _build_jtmspro_unlock_payload(device: TuyaBLEDevice) -> bytes:
@@ -86,9 +83,11 @@ def _build_jtmspro_unlock_payload(device: TuyaBLEDevice) -> bytes:
       00 01                   trailer ("01" seems to indicate "act on it")
     """
     import struct
+    # Use the shared user_id resolver on the device (cloud + fallback).
+    user_id = device._get_jtmspro_user_id()
     ts = int(time.time())
     payload = bytearray(b"\xff\xff\x00\x02")
-    payload += JTMSPRO_BLE_USER_ID  # 8 bytes
+    payload += user_id               # 8 bytes
     payload += b"\x01"               # unlock type flag
     payload += struct.pack(">I", ts)
     payload += b"\x00\x01"           # trailer

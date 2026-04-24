@@ -1538,6 +1538,28 @@ class TuyaBLEDevice:
         )
         await self._send_packet(TuyaBLECode.FUN_SENDER_DPS_V4, data)
 
+    def _get_jtmspro_user_id(self) -> bytes:
+        """Return the BLE user_id for jtmspro unlock/auth commands.
+
+        Priority: cloud-derived value from ble_unlock_check DP, else the
+        known-registered fallback captured from the original HCI session.
+        The fallback lets production lock #1 continue to operate if cloud
+        fetch fails at integration load.
+        """
+        if self._device_info is not None:
+            cloud_id = getattr(self._device_info, "ble_user_id", None)
+            if cloud_id:
+                # Stored as str to keep config-entry JSON-serializable; BLE
+                # payload needs bytes.
+                return cloud_id.encode("ascii")
+        _LOGGER.warning(
+            "%s: jtmspro BLE user_id unavailable from cloud; using fallback "
+            "84042128. If this is a newly-paired lock, unlock it once via "
+            "Smart Life then reload the integration.",
+            self.address,
+        )
+        return b"84042128"
+
     async def _send_jtmspro_user_auth(self) -> None:
         """Send subcmd 0x45 BLE user authentication for jtmspro locks.
 
@@ -1553,11 +1575,9 @@ class TuyaBLEDevice:
           [user_id_ascii:8]        registered BLE user
           00                       trailer
         """
-        # TODO: parameterize user_id per-device once we understand how it's
-        # generated. For now this is Paul's known-registered ID.
-        JTMSPRO_USER_ID = b"84042128"
+        user_id = self._get_jtmspro_user_id()
         payload = bytearray(b"\xff\xff\x00\x02")
-        payload += JTMSPRO_USER_ID
+        payload += user_id
         payload += b"\x00"
         try:
             await self.send_raw_command_v4(0x45, bytes(payload))
