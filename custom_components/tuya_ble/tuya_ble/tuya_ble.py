@@ -1232,8 +1232,28 @@ class TuyaBLEDevice:
                     "%s: FUN_RECEIVE_DP_V4 payload (%d bytes): %s",
                     self.address, len(data), data.hex(),
                 )
-                # Skip 4-byte dp_seq prefix, parse V4 records.
-                if len(data) >= 4:
+                # Detect the lock's "please re-authenticate" greeting.
+                # Structure (14 bytes):
+                #   00 00 00 00 [idx:1] 00 00 45 00 00 03 00 02 01
+                # The 0x45 at offset 7 tells us to send subcmd 0x45 user
+                # registration. Without it, the lock refuses to send bulk
+                # status and ignores unlock commands (though it still ACKs
+                # them at the frame level).
+                is_auth_prompt = (
+                    len(data) == 14
+                    and data[:4] == b"\x00\x00\x00\x00"
+                    and len(data) > 10
+                    and data[7] == 0x45
+                    and data[10] == 0x03
+                )
+                if is_auth_prompt and self.category == "jtmspro":
+                    _LOGGER.info(
+                        "%s: jtmspro auth prompt received; sending subcmd 0x45",
+                        self.address,
+                    )
+                    asyncio.create_task(self._send_jtmspro_user_auth())
+                elif len(data) >= 4:
+                    # Normal V4 DP data packet
                     self._parse_datapoints_v4(time.time(), 0, data, 4)
                 asyncio.create_task(
                     self._send_response(code, bytes(0), seq_num))
@@ -1517,6 +1537,34 @@ class TuyaBLEDevice:
             self.address, self._outbound_idx, subcmd, payload.hex(),
         )
         await self._send_packet(TuyaBLECode.FUN_SENDER_DPS_V4, data)
+
+    async def _send_jtmspro_user_auth(self) -> None:
+        """Send subcmd 0x45 BLE user authentication for jtmspro locks.
+
+        The lock refuses to report DP status or accept unlock commands
+        until the phone identifies itself via subcmd 0x45 with a registered
+        user_id. Smart Life generates a per-account user_id during initial
+        pairing (captured value below). Re-sending this on every BLE
+        reconnect re-authorizes the session — idempotent, doesn't create
+        new users.
+
+        Payload format (13 bytes, verified from HCI):
+          ff ff 00 02              4-byte constant prefix
+          [user_id_ascii:8]        registered BLE user
+          00                       trailer
+        """
+        # TODO: parameterize user_id per-device once we understand how it's
+        # generated. For now this is Paul's known-registered ID.
+        JTMSPRO_USER_ID = b"84042128"
+        payload = bytearray(b"\xff\xff\x00\x02")
+        payload += JTMSPRO_USER_ID
+        payload += b"\x00"
+        try:
+            await self.send_raw_command_v4(0x45, bytes(payload))
+        except Exception as exc:
+            _LOGGER.warning(
+                "%s: jtmspro auth send failed: %s", self.address, exc,
+            )
 
     async def _send_datapoints(self, datapoint_ids: list[int]) -> None:
         """Send new values of datapoints to the device."""
