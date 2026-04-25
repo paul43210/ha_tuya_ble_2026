@@ -304,8 +304,16 @@ class TuyaBLEDevice:
     async def _update_device_info(self) -> bool:
         if self._device_info is None:
             if self._device_manager:
+                # force_update=True: bypass the config-entry persistent data
+                # shortcut and always re-fetch credentials from the Tuya
+                # cloud. This is what catches user_id rotation after a
+                # factory-reset + Smart Life re-pair (the lock generates a
+                # new user_id, the cloud reflects it, but the credentials
+                # we previously saved to entry.data are now stale).
+                # Cost: one cloud round-trip per BLE reconnect — acceptable
+                # for cabinet locks that connect a few times per day.
                 self._device_info = await self._device_manager.get_device_credentials(
-                    self._ble_device.address, False
+                    self._ble_device.address, True
                 )
             if self._device_info:
                 self._local_key = self._device_info.local_key[:6].encode()

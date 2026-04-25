@@ -280,6 +280,11 @@ class HASSTuyaBLEDeviceManager(AbstaractTuyaBLEDeviceManager):
                             }
 
     async def build_cache(self) -> None:
+        # Always refresh per cache entry — the cloud's status DPs (notably
+        # ble_unlock_check, which carries the BLE user_id) can change
+        # between HA sessions when a lock has been factory-reset and
+        # re-paired. Skipping the refresh leaves HA using stale credentials
+        # forever. See v0.3.3 changelog.
         global _cache
         data = {}
         tuya_config_entries = self._hass.config_entries.async_entries(TUYA_DOMAIN)
@@ -287,24 +292,22 @@ class HASSTuyaBLEDeviceManager(AbstaractTuyaBLEDeviceManager):
             data.clear()
             data.update(config_entry.data)
             key = self._get_cache_key(data)
-            item = _cache.get(key)
-            if item is None or len(item.credentials) == 0:
-                if self._is_login_success(await self._login(data, True)):
-                    item = _cache.get(key)
-                    if item and len(item.credentials) == 0:
-                        await self._fill_cache_item(item)
+            if self._is_login_success(await self._login(data, True)):
+                item = _cache.get(key)
+                if item is not None:
+                    item.credentials.clear()
+                    await self._fill_cache_item(item)
 
         ble_config_entries = self._hass.config_entries.async_entries(DOMAIN)
         for config_entry in ble_config_entries:
             data.clear()
             data.update(config_entry.options)
             key = self._get_cache_key(data)
-            item = _cache.get(key)
-            if item is None or len(item.credentials) == 0:
-                if self._is_login_success(await self._login(data, True)):
-                    item = _cache.get(key)
-                    if item and len(item.credentials) == 0:
-                        await self._fill_cache_item(item)
+            if self._is_login_success(await self._login(data, True)):
+                item = _cache.get(key)
+                if item is not None:
+                    item.credentials.clear()
+                    await self._fill_cache_item(item)
 
     def get_login_from_cache(self) -> None:
         global _cache
