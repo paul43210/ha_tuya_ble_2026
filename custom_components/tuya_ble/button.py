@@ -204,11 +204,27 @@ class TuyaBLEButton(TuyaBLEEntity, ButtonEntity):
                 "Sending raw V4 subcommand %#x with %d-byte payload",
                 self._mapping.raw_subcmd, len(payload),
             )
-            self._hass.create_task(
-                self._device.send_raw_command_v4(
-                    self._mapping.raw_subcmd, payload
+            # For jtmspro unlock (subcmd 0x47), the lock requires a recent
+            # subcmd 0x45 user-auth on the same session before it will
+            # honor the unlock. Some lock firmwares prompt for this auth
+            # automatically on a timer; others (e.g. fresh-paired locks
+            # post factory-reset) do not. Sending 0x45 proactively before
+            # 0x47 is idempotent (it does NOT register a new user, it
+            # re-authorizes the existing one) and matches what Smart Life
+            # does internally.
+            if (
+                self._mapping.raw_subcmd == 0x47
+                and getattr(self._device, "category", None) == "jtmspro"
+            ):
+                self._hass.create_task(
+                    self._device.send_jtmspro_unlock(payload)
                 )
-            )
+            else:
+                self._hass.create_task(
+                    self._device.send_raw_command_v4(
+                        self._mapping.raw_subcmd, payload
+                    )
+                )
             return
 
         # Path 2: DP toggle (fingerbot-style)

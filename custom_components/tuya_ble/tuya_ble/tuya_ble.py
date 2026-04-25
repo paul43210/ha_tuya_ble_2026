@@ -1586,6 +1586,35 @@ class TuyaBLEDevice:
                 "%s: jtmspro auth send failed: %s", self.address, exc,
             )
 
+    async def send_jtmspro_unlock(self, payload: bytes) -> None:
+        """Authenticate then send a jtmspro unlock command (subcmd 0x47).
+
+        The CTL20H lock rejects subcmd 0x47 (status code 0x03) unless the
+        session has a recent subcmd 0x45 user authentication. Some firmware
+        builds prompt for the auth on a timer (medicine lock behavior);
+        others — typically locks that have been factory-reset and re-paired
+        recently — do not prompt at all (knives lock behavior). Sending
+        0x45 proactively before each 0x47 makes the unlock work either way,
+        and matches what Smart Life does internally.
+
+        The auth is idempotent — re-sending it does NOT register a new
+        user_id; the lock just refreshes the session's authorization for
+        the already-registered user.
+        """
+        try:
+            await self._send_jtmspro_user_auth()
+        except Exception as exc:
+            _LOGGER.warning(
+                "%s: jtmspro pre-unlock auth failed, attempting unlock anyway: %s",
+                self.address, exc,
+            )
+        try:
+            await self.send_raw_command_v4(0x47, payload)
+        except Exception as exc:
+            _LOGGER.error(
+                "%s: jtmspro unlock send failed: %s", self.address, exc,
+            )
+
     async def _send_datapoints(self, datapoint_ids: list[int]) -> None:
         """Send new values of datapoints to the device."""
         if self._protocol_version == 3:
