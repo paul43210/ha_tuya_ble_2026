@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
-import time
 from typing import Any, Callable
 
 from homeassistant.components.lock import (
@@ -115,19 +114,14 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
         # changes.
         self._attr_is_locking = False
         self._attr_is_unlocking = False
-        # Confirmation tracking: we cannot use DP 33 (lock_state) to detect
-        # "operation completed" because set_value() optimistically updates
-        # _value synchronously, before the BLE round-trip starts. So DP 33
-        # appears confirmed instantly even though the lock has not moved.
-        #
-        # DP 47 (motor_state) is only updated when the device pushes a new
-        # value after the physical motor moves. If the motor_state value
-        # differs from what it was when the user initiated the operation,
-        # the lock has actually moved and we can clear the spinner.
-        self._motor_state_at_op_start: bool | None = None
-        # Operation start wallclock time, used purely for the safety timeout.
-        self._operation_started_at: float = 0.0
-        self._operation_timeout_seconds: float = 60.0
+        # While in-flight, _handle_coordinator_update must not clear the
+        # transient state. set_value() optimistically mutates DP 33's value
+        # synchronously and triggers a coordinator update before the BLE
+        # round-trip completes; without this gate the spinner clears
+        # instantly. async_lock/unlock awaits set_value (which blocks until
+        # the lock acks the BLE write) then clears the spinner explicitly
+        # in its finally block.
+        self._operation_in_flight: bool = False
 
     @property
     def is_locked(self) -> bool | None:
@@ -143,58 +137,13 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
         return bool(datapoint.value)
 
     def _handle_coordinator_update(self) -> None:
-        """Clear transient state ONLY when the lock has actually confirmed.
+        """Coordinator update.
 
-        Confirmation = DP 47 (motor_state) has been updated by a device push
-        with a newer timestamp than our most recent user-initiated operation.
-
-        Why this is non-trivial: when the user taps lock/unlock, our async_lock
-        calls datapoint.set_value() which (a) mutates _value synchronously and
-        (b) awaits _update_from_user, which fires the coordinator update. Our
-        own write thus triggers _handle_coordinator_update before any BLE
-        round-trip completes. If we clear the spinner there, it disappears
-        immediately and the UI never shows the "locking"/"unlocking" state.
-
-        We additionally clear if a configured safety timeout has elapsed so
-        the UI does not show a permanently stuck spinner if the lock never
-        confirms (e.g. BLE link died mid-operation).
+        While an operation is in flight, leave the transient flags alone -
+        async_lock/async_unlock manages them explicitly. Once in-flight is
+        clear, this becomes a normal coordinator update that just refreshes
+        is_locked from the datapoint.
         """
-        if self._attr_is_locking or self._attr_is_unlocking:
-            should_clear = False
-            # Confirmation path: motor_state value differs from what it was
-            # when the user initiated the operation. DP 47 is only updated
-            # via device push (we never write to it), so any value change
-            # represents the lock physically reporting its new motor state.
-            motor_dp = self._device.datapoints[47]
-            if (
-                motor_dp is not None
-                and bool(motor_dp.value) != self._motor_state_at_op_start
-            ):
-                _LOGGER.debug(
-                    "%s: motor_state moved from %s to %s; clearing spinner",
-                    self._device.address,
-                    self._motor_state_at_op_start,
-                    motor_dp.value,
-                )
-                should_clear = True
-            # Timeout path: safety net for never-confirmed operations
-            # (BLE link died, lock unreachable, etc).
-            elif (
-                self._operation_started_at > 0
-                and time.time() - self._operation_started_at
-                > self._operation_timeout_seconds
-            ):
-                _LOGGER.debug(
-                    "%s: operation timeout (%ss); clearing spinner",
-                    self._device.address,
-                    self._operation_timeout_seconds,
-                )
-                should_clear = True
-            if should_clear:
-                self._attr_is_locking = False
-                self._attr_is_unlocking = False
-                self._motor_state_at_op_start = None
-                self._operation_started_at = 0.0
         super()._handle_coordinator_update()
 
     async def async_lock(self, **kwargs: Any) -> None:
@@ -205,58 +154,63 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
         shows the `locking` transient state for clear user feedback.
         """
         _LOGGER.debug("%s: lock requested", self._device.address)
-        # Snapshot current motor state so _handle_coordinator_update can
-        # detect when it changes (= lock actually moved, spinner can clear).
-        motor_dp = self._device.datapoints[47]
-        self._motor_state_at_op_start = (
-            bool(motor_dp.value) if motor_dp is not None else None
-        )
         self._attr_is_locking = True
         self._attr_is_unlocking = False
-        self._operation_started_at = time.time()
+        self._operation_in_flight = True
         self.async_write_ha_state()
         datapoint = self._device.datapoints.get_or_create(
             self._mapping.dp_id,
             TuyaBLEDataPointType.DT_BOOL,
             True,
         )
-        if datapoint:
-            try:
-                await datapoint.set_value(True)
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception(
-                    "%s: lock operation failed", self._device.address
-                )
-                self._attr_is_locking = False
-                self.async_write_ha_state()
-                raise
+        if datapoint is None:
+            self._attr_is_locking = False
+            self._operation_in_flight = False
+            self.async_write_ha_state()
+            return
+        try:
+            # set_value awaits the full BLE round-trip (connect if needed,
+            # write, await response). When this returns the lock has
+            # confirmed the new state at the protocol level.
+            await datapoint.set_value(True)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception(
+                "%s: lock operation failed", self._device.address
+            )
+            raise
+        finally:
+            self._attr_is_locking = False
+            self._operation_in_flight = False
+            self.async_write_ha_state()
 
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the device. Writes DP 33 = False."""
         _LOGGER.debug("%s: unlock requested", self._device.address)
-        motor_dp = self._device.datapoints[47]
-        self._motor_state_at_op_start = (
-            bool(motor_dp.value) if motor_dp is not None else None
-        )
         self._attr_is_unlocking = True
         self._attr_is_locking = False
-        self._operation_started_at = time.time()
+        self._operation_in_flight = True
         self.async_write_ha_state()
         datapoint = self._device.datapoints.get_or_create(
             self._mapping.dp_id,
             TuyaBLEDataPointType.DT_BOOL,
             False,
         )
-        if datapoint:
-            try:
-                await datapoint.set_value(False)
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception(
-                    "%s: unlock operation failed", self._device.address
-                )
-                self._attr_is_unlocking = False
-                self.async_write_ha_state()
-                raise
+        if datapoint is None:
+            self._attr_is_unlocking = False
+            self._operation_in_flight = False
+            self.async_write_ha_state()
+            return
+        try:
+            await datapoint.set_value(False)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception(
+                "%s: unlock operation failed", self._device.address
+            )
+            raise
+        finally:
+            self._attr_is_unlocking = False
+            self._operation_in_flight = False
+            self.async_write_ha_state()
 
 
 async def async_setup_entry(
