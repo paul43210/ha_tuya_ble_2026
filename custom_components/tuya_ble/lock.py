@@ -107,12 +107,14 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
     ) -> None:
         super().__init__(hass, coordinator, device, product, mapping.description)
         self._mapping = mapping
-        # Track in-flight operation so the UI shows a spinner while the BLE
-        # round-trip is happening. Cleared on the next coordinator update
-        # (which fires when the DP value actually changes), or by a timeout
-        # safety net if the operation silently fails.
-        self._is_locking: bool = False
-        self._is_unlocking: bool = False
+        # Transient state for the spinner. We use HA's _attr_* pattern rather
+        # than a property override because HA's LockEntity lists is_locking
+        # and is_unlocking in CACHED_PROPERTIES_WITH_ATTR_; the cache
+        # invalidation hooks fire on _attr_* assignment, not on private flag
+        # changes. v0.4.0 used private flags + a property override and the
+        # spinner never appeared in the UI as a result.
+        self._attr_is_locking = False
+        self._attr_is_unlocking = False
 
     @property
     def is_locked(self) -> bool | None:
@@ -127,24 +129,14 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
             return None
         return bool(datapoint.value)
 
-    @property
-    def is_locking(self) -> bool:
-        """Return true while a lock operation is in flight."""
-        return self._is_locking
-
-    @property
-    def is_unlocking(self) -> bool:
-        """Return true while an unlock operation is in flight."""
-        return self._is_unlocking
-
-    def _coordinator_update_received(self) -> None:
-        """Coordinator has new data — clear any in-flight transient state."""
-        self._is_locking = False
-        self._is_unlocking = False
-
     def _handle_coordinator_update(self) -> None:
-        """Override to clear transient state when fresh data arrives."""
-        self._coordinator_update_received()
+        """Clear transient locking/unlocking state when fresh DP data arrives.
+
+        Once the lock confirms the new state via DP push, the spinner
+        should disappear regardless of which transient flag was set.
+        """
+        self._attr_is_locking = False
+        self._attr_is_unlocking = False
         super()._handle_coordinator_update()
 
     async def async_lock(self, **kwargs: Any) -> None:
@@ -155,8 +147,8 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
         shows the `locking` transient state for clear user feedback.
         """
         _LOGGER.debug("%s: lock requested", self._device.address)
-        self._is_locking = True
-        self._is_unlocking = False
+        self._attr_is_locking = True
+        self._attr_is_unlocking = False
         self.async_write_ha_state()
         datapoint = self._device.datapoints.get_or_create(
             self._mapping.dp_id,
@@ -170,15 +162,15 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
                 _LOGGER.exception(
                     "%s: lock operation failed", self._device.address
                 )
-                self._is_locking = False
+                self._attr_is_locking = False
                 self.async_write_ha_state()
                 raise
 
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the device. Writes DP 33 = False."""
         _LOGGER.debug("%s: unlock requested", self._device.address)
-        self._is_unlocking = True
-        self._is_locking = False
+        self._attr_is_unlocking = True
+        self._attr_is_locking = False
         self.async_write_ha_state()
         datapoint = self._device.datapoints.get_or_create(
             self._mapping.dp_id,
@@ -192,7 +184,7 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
                 _LOGGER.exception(
                     "%s: unlock operation failed", self._device.address
                 )
-                self._is_unlocking = False
+                self._attr_is_unlocking = False
                 self.async_write_ha_state()
                 raise
 
