@@ -210,6 +210,40 @@ class TuyaBLEDataPoints:
 global_connect_lock = asyncio.Lock()
 
 
+# v0.4.0: Connect-on-demand lifecycle
+#
+# For battery-powered BLE devices like the CTL20H cabinet locks, holding a
+# persistent BLE connection drains the lock's batteries in weeks rather than
+# years. Smart Life behaves differently: it connects only when the user asks
+# to act on the lock, then disconnects shortly after.
+#
+# CONNECT_ON_DEMAND_CATEGORIES lists Tuya categories that should follow this
+# lifecycle: connect on operation, disconnect after a short idle, no
+# auto-reconnect on unexpected disconnect, only periodic poll for telemetry.
+#
+# Categories not in this set keep the original always-connected behavior
+# (fingerbots, plant sensors, etc. that need real-time data).
+CONNECT_ON_DEMAND_CATEGORIES: set[str] = {"jtmspro"}
+
+# Seconds after the last write/read activity before disconnecting on idle.
+# Long enough to handle a quick second operation (toggle and immediately
+# toggle back) without paying the reconnect cost; short enough that we do not
+# linger on the radio. 5 seconds is a balance.
+IDLE_DISCONNECT_SECONDS: dict[str, float] = {"jtmspro": 5.0}
+
+# Periodic poll interval for telemetry refresh (battery, lock state).
+# 24 hours per Paul's preference for cabinet locks - rare enough to be near
+# zero battery cost, frequent enough to catch a stuck low-battery state
+# within a day.
+PERIODIC_POLL_INTERVAL_SECONDS: dict[str, float] = {"jtmspro": 24 * 3600.0}
+
+# After this many consecutive failed connect attempts, fall back to
+# always-connected behavior for safety until next HA restart. Defensive
+# guardrail: better an unreliable lock that drains batteries faster than
+# an unreachable lock that silently never accepts an unlock command.
+MAX_CONSECUTIVE_CONNECT_FAILURES_BEFORE_FALLBACK: int = 5
+
+
 class TuyaBLEDevice:
     def __init__(
         self,
@@ -236,6 +270,12 @@ class TuyaBLEDevice:
         self._flags = 0
         self._protocol_version = 2
         self._outbound_idx = 0  # V4 outgoing command counter (shared across DP writes and subcommands)
+
+        # v0.4.0 connect-on-demand state
+        self._idle_disconnect_handle: asyncio.TimerHandle | None = None
+        self._periodic_poll_task: asyncio.Task | None = None
+        self._consecutive_connect_failures: int = 0
+        self._connect_on_demand_disabled: bool = False  # Safety fallback flag
 
         self._device_version: str = ""
         self._protocol_version_str: str = ""
@@ -496,12 +536,73 @@ class TuyaBLEDevice:
     async def start(self):
         """Start the TuyaBLE."""
         _LOGGER.debug("%s: Starting...", self.address)
-        # await self._send_packet()
+        # v0.4.0: For connect-on-demand categories, schedule a periodic
+        # poll task to refresh telemetry (battery %, lock state) without
+        # holding a permanent connection.
+        if self.category in CONNECT_ON_DEMAND_CATEGORIES:
+            interval = PERIODIC_POLL_INTERVAL_SECONDS.get(self.category)
+            if interval and self._periodic_poll_task is None:
+                self._periodic_poll_task = asyncio.create_task(
+                    self._periodic_poll_loop(interval)
+                )
+                _LOGGER.debug(
+                    "%s: scheduled periodic poll every %.0fs",
+                    self.address,
+                    interval,
+                )
 
     async def stop(self) -> None:
         """Stop the TuyaBLE."""
         _LOGGER.debug("%s: Stop", self.address)
+        # v0.4.0: cancel periodic poll if it is running.
+        if self._periodic_poll_task is not None:
+            self._periodic_poll_task.cancel()
+            self._periodic_poll_task = None
+        self._cancel_idle_disconnect()
         await self._execute_disconnect()
+
+    async def _periodic_poll_loop(self, interval_seconds: float) -> None:
+        """Background task that periodically wakes the device for a telemetry refresh.
+
+        For connect-on-demand devices, this is the only way to keep state
+        moderately fresh without holding a permanent BLE connection.
+
+        On each tick: connect, exchange device-info / status, schedule the
+        idle disconnect (will fire after IDLE_DISCONNECT_SECONDS), sleep.
+
+        Failures are logged but never raised to the loop body. The retry on
+        next tick is the recovery path. The safety-fallback in
+        _ensure_connected handles the runaway-failure case.
+        """
+        try:
+            # Small initial offset so all devices do not poll simultaneously.
+            await asyncio.sleep(60)
+            while True:
+                if self._connect_on_demand_disabled:
+                    # Once we have fallen back to always-connected, the
+                    # always-connected loop handles freshness; stop polling.
+                    _LOGGER.debug(
+                        "%s: connect-on-demand disabled; stopping periodic poll",
+                        self.address,
+                    )
+                    return
+                try:
+                    _LOGGER.debug("%s: periodic poll tick", self.address)
+                    await self._ensure_connected()
+                    # _ensure_connected already does FUN_SENDER_DEVICE_INFO
+                    # and the lock pushes its DPs after pairing, so just
+                    # reaching this point gives us a fresh snapshot.
+                    self._maybe_schedule_idle_disconnect()
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.debug(
+                        "%s: periodic poll failed: %s",
+                        self.address,
+                        exc,
+                    )
+                await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            _LOGGER.debug("%s: periodic poll cancelled", self.address)
+            raise
 
     def _disconnected(self, client: BleakClientWithServiceCache) -> None:
         """Disconnected callback."""
@@ -522,6 +623,24 @@ class TuyaBLEDevice:
             self.rssi,
         )
         if was_paired:
+            # v0.4.0: For connect-on-demand categories, the lock has either
+            # voluntarily disconnected after the radio's keep-alive timeout
+            # (normal) or our idle disconnect just fired (also normal).
+            # Do NOT auto-reconnect; the next operation or scheduled poll
+            # will reconnect when needed. This is the entire point - leaving
+            # the lock disconnected most of the time saves battery.
+            #
+            # The fallback flag preserves the original behavior if we have
+            # had repeated connect failures (lock genuinely unreachable).
+            if (
+                self.category in CONNECT_ON_DEMAND_CATEGORIES
+                and not self._connect_on_demand_disabled
+            ):
+                _LOGGER.debug(
+                    "%s: connect-on-demand mode; not auto-reconnecting",
+                    self.address,
+                )
+                return
             _LOGGER.debug(
                 "%s: Scheduling reconnect; RSSI: %s",
                 self.address,
@@ -529,8 +648,53 @@ class TuyaBLEDevice:
             )
             asyncio.create_task(self._reconnect())
 
+    def _maybe_schedule_idle_disconnect(self) -> None:
+        """Schedule a disconnect after the configured idle window.
+
+        Used by connect-on-demand categories (e.g. jtmspro locks) to release
+        the BLE link shortly after each operation. Cancels any previously
+        scheduled idle disconnect first, so multiple back-to-back operations
+        push the deadline forward rather than pile up.
+
+        No-op for categories not in CONNECT_ON_DEMAND_CATEGORIES, or when
+        the safety-fallback flag has been raised.
+        """
+        if self.category not in CONNECT_ON_DEMAND_CATEGORIES:
+            return
+        if self._connect_on_demand_disabled:
+            return
+        delay = IDLE_DISCONNECT_SECONDS.get(self.category)
+        if not delay:
+            return
+        # Cancel any pending idle-disconnect; reschedule from now.
+        if self._idle_disconnect_handle is not None:
+            self._idle_disconnect_handle.cancel()
+            self._idle_disconnect_handle = None
+        loop = asyncio.get_running_loop()
+        self._idle_disconnect_handle = loop.call_later(
+            delay, self._fire_idle_disconnect
+        )
+        _LOGGER.debug(
+            "%s: idle disconnect scheduled in %.1fs", self.address, delay
+        )
+
+    def _fire_idle_disconnect(self) -> None:
+        """Idle-disconnect timer callback: actually trigger the disconnect."""
+        self._idle_disconnect_handle = None
+        # _disconnect creates a task; safe from a sync callback.
+        self._disconnect()
+
+    def _cancel_idle_disconnect(self) -> None:
+        """Cancel any pending idle disconnect (e.g. before a fresh operation)."""
+        if self._idle_disconnect_handle is not None:
+            self._idle_disconnect_handle.cancel()
+            self._idle_disconnect_handle = None
+
     def _disconnect(self) -> None:
         """Disconnect from device."""
+        # Always cancel the idle timer in case _disconnect is called for
+        # another reason (HA shutdown, integration unload, etc.).
+        self._cancel_idle_disconnect()
         asyncio.create_task(self._execute_timed_disconnect())
 
     async def _execute_timed_disconnect(self) -> None:
@@ -699,6 +863,14 @@ class TuyaBLEDevice:
             if self._client.is_connected:
                 if self._is_paired:
                     _LOGGER.debug("%s: Successfully connected", self.address)
+                    # v0.4.0: reset failure counter on successful connect
+                    if self._consecutive_connect_failures > 0:
+                        _LOGGER.debug(
+                            "%s: clearing failure counter (was %d)",
+                            self.address,
+                            self._consecutive_connect_failures,
+                        )
+                        self._consecutive_connect_failures = 0
                     self._fire_connected_callbacks()
                 else:
                     _LOGGER.error("%s: Connected but not paired", self.address)
@@ -845,6 +1017,12 @@ class TuyaBLEDevice:
         if self._expected_disconnect:
             return
         await self._send_packet_while_connected(code, data, 0, wait_for_response)
+        # v0.4.0: For connect-on-demand categories, schedule a delayed
+        # disconnect so the lock can return to its low-power advertising
+        # state. We schedule rather than disconnect immediately so a
+        # follow-up operation arriving within the idle window does not pay
+        # the reconnect cost.
+        self._maybe_schedule_idle_disconnect()
 
     async def _send_response(
         self,
