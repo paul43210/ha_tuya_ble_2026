@@ -59,6 +59,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ) from ex
     '''
     hass.add_job(device.update())
+    # v0.4.1: Schedule device.start() so connect-on-demand categories
+    # (jtmspro) get their periodic poll task. start() is a no-op for
+    # other categories. Existing fork never invoked start() at all,
+    # so this only opts new categories in.
+    hass.async_create_task(device.start())
 
     @callback
     def _async_update_ble(

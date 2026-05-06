@@ -724,6 +724,24 @@ class TuyaBLEDevice:
     async def _ensure_connected(self) -> None:
         """Ensure connection to device is established."""
         global global_connect_lock
+        # v0.4.1: For connect-on-demand categories, a fresh user/poll
+        # initiated operation should clear the expected-disconnect flag
+        # raised by an earlier idle disconnect. Without this, all
+        # subsequent operations short-circuit because the flag stays True
+        # forever after the first idle disconnect fires.
+        #
+        # Only clear if we are actually disconnected — guard against
+        # racing with an in-progress disconnect.
+        if (
+            self._expected_disconnect
+            and self.category in CONNECT_ON_DEMAND_CATEGORIES
+            and (self._client is None or not self._client.is_connected)
+        ):
+            _LOGGER.debug(
+                "%s: clearing expected_disconnect for new operation",
+                self.address,
+            )
+            self._expected_disconnect = False
         if self._expected_disconnect:
             return
         if self._connect_lock.locked():
@@ -1011,6 +1029,15 @@ class TuyaBLEDevice:
         # retry: int | None = None,
     ) -> None:
         """Send packet to device and optional read response."""
+        # v0.4.1: For connect-on-demand, a sticky expected_disconnect from a
+        # prior idle disconnect must not block a new send. Clear it before
+        # the early-return check so _ensure_connected can do its work.
+        if (
+            self._expected_disconnect
+            and self.category in CONNECT_ON_DEMAND_CATEGORIES
+            and (self._client is None or not self._client.is_connected)
+        ):
+            self._expected_disconnect = False
         if self._expected_disconnect:
             return
         await self._ensure_connected()
