@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
+import time
 from typing import Any, Callable
 
 from homeassistant.components.lock import (
@@ -111,10 +112,22 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
         # than a property override because HA's LockEntity lists is_locking
         # and is_unlocking in CACHED_PROPERTIES_WITH_ATTR_; the cache
         # invalidation hooks fire on _attr_* assignment, not on private flag
-        # changes. v0.4.0 used private flags + a property override and the
-        # spinner never appeared in the UI as a result.
+        # changes.
         self._attr_is_locking = False
         self._attr_is_unlocking = False
+        # Confirmation tracking: we cannot use DP 33 (lock_state) to detect
+        # "operation completed" because set_value() optimistically updates
+        # _value synchronously, before the BLE round-trip starts. So DP 33
+        # appears confirmed instantly even though the lock has not moved.
+        #
+        # DP 47 (motor_state) is only updated when the device pushes a new
+        # value after the physical motor moves. If the motor_state value
+        # differs from what it was when the user initiated the operation,
+        # the lock has actually moved and we can clear the spinner.
+        self._motor_state_at_op_start: bool | None = None
+        # Operation start wallclock time, used purely for the safety timeout.
+        self._operation_started_at: float = 0.0
+        self._operation_timeout_seconds: float = 60.0
 
     @property
     def is_locked(self) -> bool | None:
@@ -130,13 +143,58 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
         return bool(datapoint.value)
 
     def _handle_coordinator_update(self) -> None:
-        """Clear transient locking/unlocking state when fresh DP data arrives.
+        """Clear transient state ONLY when the lock has actually confirmed.
 
-        Once the lock confirms the new state via DP push, the spinner
-        should disappear regardless of which transient flag was set.
+        Confirmation = DP 47 (motor_state) has been updated by a device push
+        with a newer timestamp than our most recent user-initiated operation.
+
+        Why this is non-trivial: when the user taps lock/unlock, our async_lock
+        calls datapoint.set_value() which (a) mutates _value synchronously and
+        (b) awaits _update_from_user, which fires the coordinator update. Our
+        own write thus triggers _handle_coordinator_update before any BLE
+        round-trip completes. If we clear the spinner there, it disappears
+        immediately and the UI never shows the "locking"/"unlocking" state.
+
+        We additionally clear if a configured safety timeout has elapsed so
+        the UI does not show a permanently stuck spinner if the lock never
+        confirms (e.g. BLE link died mid-operation).
         """
-        self._attr_is_locking = False
-        self._attr_is_unlocking = False
+        if self._attr_is_locking or self._attr_is_unlocking:
+            should_clear = False
+            # Confirmation path: motor_state value differs from what it was
+            # when the user initiated the operation. DP 47 is only updated
+            # via device push (we never write to it), so any value change
+            # represents the lock physically reporting its new motor state.
+            motor_dp = self._device.datapoints[47]
+            if (
+                motor_dp is not None
+                and bool(motor_dp.value) != self._motor_state_at_op_start
+            ):
+                _LOGGER.debug(
+                    "%s: motor_state moved from %s to %s; clearing spinner",
+                    self._device.address,
+                    self._motor_state_at_op_start,
+                    motor_dp.value,
+                )
+                should_clear = True
+            # Timeout path: safety net for never-confirmed operations
+            # (BLE link died, lock unreachable, etc).
+            elif (
+                self._operation_started_at > 0
+                and time.time() - self._operation_started_at
+                > self._operation_timeout_seconds
+            ):
+                _LOGGER.debug(
+                    "%s: operation timeout (%ss); clearing spinner",
+                    self._device.address,
+                    self._operation_timeout_seconds,
+                )
+                should_clear = True
+            if should_clear:
+                self._attr_is_locking = False
+                self._attr_is_unlocking = False
+                self._motor_state_at_op_start = None
+                self._operation_started_at = 0.0
         super()._handle_coordinator_update()
 
     async def async_lock(self, **kwargs: Any) -> None:
@@ -147,8 +205,15 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
         shows the `locking` transient state for clear user feedback.
         """
         _LOGGER.debug("%s: lock requested", self._device.address)
+        # Snapshot current motor state so _handle_coordinator_update can
+        # detect when it changes (= lock actually moved, spinner can clear).
+        motor_dp = self._device.datapoints[47]
+        self._motor_state_at_op_start = (
+            bool(motor_dp.value) if motor_dp is not None else None
+        )
         self._attr_is_locking = True
         self._attr_is_unlocking = False
+        self._operation_started_at = time.time()
         self.async_write_ha_state()
         datapoint = self._device.datapoints.get_or_create(
             self._mapping.dp_id,
@@ -169,8 +234,13 @@ class TuyaBLELock(TuyaBLEEntity, LockEntity):
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the device. Writes DP 33 = False."""
         _LOGGER.debug("%s: unlock requested", self._device.address)
+        motor_dp = self._device.datapoints[47]
+        self._motor_state_at_op_start = (
+            bool(motor_dp.value) if motor_dp is not None else None
+        )
         self._attr_is_unlocking = True
         self._attr_is_locking = False
+        self._operation_started_at = time.time()
         self.async_write_ha_state()
         datapoint = self._device.datapoints.get_or_create(
             self._mapping.dp_id,
